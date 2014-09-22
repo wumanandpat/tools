@@ -118,9 +118,13 @@ class isql(cmd.Cmd):
 if __name__ == "__main__":
 	parser = argparse.ArgumentParser("SQLITE3 interface to a text-based database")
 	parser.add_argument('-d', '--database', default="database.def")
+	parser.add_argument('-q', '--query', dest='query')
 	config = parser.parse_args()
 
 	db = createDatabase(config)
 	query = isql()
 	query.prompt = 'isql> '
-	query.cmdloop()
+	if config.query:
+		query.onecmd(config.query)
+	else:
+		query.cmdloop()
