@@ -1,0 +1,385 @@
+#!/usr/bin/env python
+import sqlite3
+import argparse
+import sys,os,stat
+import cmd
+import os.path
+import re
+
+
+db = None
+cursor = None
+config = None
+default = None
+
+metacommand_usage = ""
+def metacommand(func):
+	global metacommand_usage
+	metacommand_usage += "\n" + func.__doc__
+	return func
+
+def toggle(value):
+	if value         == None : return None
+	if value.upper() == "ON" : return True
+	if value.upper() == "OFF": return False
+	return None
+
+class Log:
+	out = sys.stdout
+	err = sys.stderr
+
+	@classmethod
+	def stderr(klass,line):
+		print >> Log.err, "ERROR: " + line
+	
+	@classmethod
+	def stdout(klass,line):
+		print >> Log.out, line
+
+	@classmethod
+	def setStdout(klass,filename):
+		if isinstance(filename,file):
+			Log.out = filename
+		else:
+			Log.out = open(filename)
+
+class config:
+	def __init__(self):
+		self.mode = "LIST"
+		self.seperator = "|"
+		self.mainPrompt("SQL>")
+		self.contPrompt("...>")
+		self.echo = False
+		self.header = False
+
+	def mainPrompt(self,prompt=None):
+		if prompt: self.main_prompt = prompt + " "
+		return self.main_prompt
+
+	def contPrompt(self,prompt=None):
+		if prompt: self.cont_prompt = prompt + " "
+		return self.cont_prompt
+
+class Formatter:
+	defaultWidth = 16
+	columnWidths = []
+
+	@classmethod
+	def width(klass,i):
+		return klass.columnWidth[i] if i < len(klass.columnWidths) else klass.defaultWidth
+
+	@classmethod
+	def format(klass,value,width):
+		fmt = "%%-%d.%ds" % (width,width)
+		return fmt % (value)
+
+	@classmethod
+	def showDescription(klass,description):
+		if config.mode == "column":
+			Log.stdout( " " . join( klass.format(col[0], klass.width(i)) for (i,col) in enumerate(description) ) )
+			Log.stdout( " " . join( "-" *  klass.width(i) for (i,col) in enumerate(description) ) )
+		else:
+			Log.stdout( config.seperator . join( col[0] for col in description) )
+
+	@classmethod
+	def showColumns(klass,row):
+		if config.mode == "column":
+			Log.stdout( " " . join( klass.format(str(field), klass.width(i)) for (i,field) in enumerate(row) ) )
+		else:
+			Log.stdout( config.seperator . join(str(field) for field in row) )
+		
+	
+def createDatabase(database):
+	global db
+	global cursor
+	db = sqlite3.connect(database)
+	db.text_factory = str
+	cursor = db.cursor()
+
+class isql(cmd.Cmd):
+	def __init__(self):
+		cmd.Cmd.__init__(self)
+		self.sqlStatement = None
+
+	# ##############################################################
+	# META COMMANDS
+	# ##############################################################
+	@metacommand
+	def _databases(self,args):
+		""".databases             List names and files of attached databases"""
+		raise NotImplementedError
+
+	@metacommand
+	def _dump(self,args):
+		""".dump ?TABLE? ...      Dump the database in an SQL text format"""
+		raise NotImplementedError
+
+	@metacommand
+	def _echo(self,args):
+		""".echo ON|OFF           Turn command echo on or off"""
+		value = toggle(args)
+		if value != None: config.echo = value
+		else:             Log.stderr("INVALID ACTION - usage .echo ON|OFF")
+
+	@metacommand
+	def _exit(self,args):
+		""".exit                  Exit this program"""
+		cursor.close()
+		db.close()
+		sys.exit(0)
+
+	@metacommand
+	def _explain(self,args):
+		""".explain ON|OFF        Turn output mode suitable for EXPLAIN on or off."""
+		raise NotImplementedError
+		
+	@metacommand
+	def _header(self,args):
+		""".header ON|OFF         Turn display of headers on or off"""
+		value = toggle(args)
+		if value != None: config.header = value
+		else:             Log.stderr("INVALID ACTION - usage .header ON|OFF")
+			
+	@metacommand
+	def _help(self, args):
+		""".help                  Show this message"""
+		print metacommand_usage
+
+	@metacommand
+	def _import(self,args):
+		""".import FILE TABLE     Import data from FILE into TABLE"""
+		raise NotImplementedError
+
+	@metacommand
+	def _indices(self,args):
+		""".indices TABLE         Show names of all indices on TABLE"""
+		raise NotImplementedError
+
+	@metacommand
+	def _mode(self,args):
+		(".mode MODE ?TABLE?     Set output mode where MODE is one of:\n"
+		"                          csv      Comma-separated values\n"
+		"                          column   Left-aligned columns.  (See .width)\n"
+		"                          html     HTML <table> code\n"
+		"                          insert   SQL insert statements for TABLE\n"
+		"                          line     One value per line\n"
+		"                          list     Values delimited by .separator string\n"
+		"                          tabs     Tab-separated values\n"
+		"                          tcl      TCL list elements")
+		supported = ["csv","column","list","tabs"]
+		mode = args.strip().lower()
+		if not (mode in supported):
+			Log.stderr("UNSUPPORTED MODE <%s>" % (args) )
+			return
+
+		if   mode == 'csv':    self._seperator(",")
+		elif mode == 'column': pass
+		elif mode == 'list':   pass
+		elif mode == 'tabs':   self._seperator("\t")
+
+		config.mode = mode
+
+	@metacommand
+	def _nullvalue(self,args):
+		""".nullvalue STRING      Print STRING in place of NULL values"""
+		raise NotImplementedError
+
+	@metacommand
+	def _output(self,args):
+		(".output FILENAME       Send output to FILENAME\n"
+		".output stdout         Send output to the screen")
+		raise NotImplementedError
+
+	@metacommand
+	def _prompt(self,args):
+		""".prompt MAIN CONTINUE  Replace the standard prompts"""
+		try:
+			
+			isMain = interpretor.prompt == config.mainPrompt()
+			setter = config.mainPrompt if isMain else config.contPrompt
+
+			prompts = re.split('\s+',args)
+			config.contPrompt(prompts[1])
+			config.mainPrompt(prompts[0])
+
+			interpretor.prompt = setter()
+		except:
+			Log.stderr(_prompt.__doc__)
+
+	@metacommand
+	def _quit(self,args):
+		""".quit                  Exit this program"""
+		self._exit(args)
+
+	@metacommand
+	def _read(self,args):
+		""".read FILENAME         Execute SQL in FILENAME"""
+		raise NotImplementedError
+		
+	@metacommand
+	def _schema(self, args):
+		""".schema ?TABLE?        Show the CREATE statements"""
+		line = "SELECT sql FROM sqlite_master;"
+		interpretor.onecmd(line)
+		raise NotImplementedError
+
+	@metacommand
+	def _seperator(self, args):
+		""".separator STRING      Change separator used by output mode and .import"""
+		config.seperator = args
+	
+	@metacommand
+	def _show(self,args):
+		""".show                  Show the current values for various settings"""
+		raise NotImplementedError
+
+	@metacommand
+	def _tables(self, args):
+		""".tables ?PATTERN?      List names of tables matching a LIKE pattern"""
+		line = "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name;"
+		interpretor.onecmd(line)
+	
+	@metacommand
+	def _timeout(self,args):
+		""".timeout MS            Try opening locked tables for MS milliseconds"""
+		raise NotImplementedError
+
+	@metacommand
+	def _width(self,args):
+		""".width NUM NUM ...     Set column widths for "column" mode"""
+		raise NotImplementedError
+
+	# ##############################################################
+	# other stuff
+	# ##############################################################
+	def do_commit(self, args):
+		"""
+		Issue a commit if you wish the changes to be permenantly saved
+		"""
+		db.commit()
+
+	def do_metacommand_help(self,args):
+		"""
+		Show help on metacommands.  Equivalent to .help
+		"""
+		self._help(args)
+
+	def emptyline(self):
+		"""
+		By default, cmd.Cmd repeats the last command if an empty line is
+		received.  Override emptyline() to avoid that behavior
+		"""
+		pass	
+
+
+	def precmd(self,args):
+		"""
+		The SQLITE metacommands cannot be directly incoporated into python's
+		cmd.Cmd infrastucture, as they a character ('.') which is not allowed
+		in an indentifier (e.g., a function name).  As such, precmd is used
+		for intercepting and processing the metacommands
+		"""
+		line = args.strip()
+		if len(line) == 0 or line[0] != '.':
+			return args
+	
+		if re.search('\s+',line):
+			metacmd, arg = re.split('\s+',line,1)
+		else:
+			metacmd, arg = line, None
+
+		try:
+			func = getattr(self, metacmd.replace(".","_"))
+			func(arg)
+		except AttributeError:
+			Log.stderr("UNSUPPORTED META_COMMAND " + metacmd)
+		return ""
+
+
+	def default(self,args):
+		"""
+		The default handler is used for collecting and executing sql commands.
+		Everything not identified as a metacommand is accumulated, and then 
+		passed through to the SQLITE server upon receipt of END-OF-RECORD (;).
+		"""
+		interpretor.prompt = config.contPrompt()
+		if self.sqlStatement:
+			self.sqlStatement += " " + args
+		else:
+			self.sqlStatement = args
+
+		if self.sqlStatement[-1] != ';':
+			return
+
+
+		try:
+			if config.echo:
+				Log.stdout(self.sqlstatement)
+				Log.stdout()
+
+			cursor.execute(self.sqlStatement)
+
+			print "should I show description?"
+			if config.header and cursor.description: 
+				print "yes i think i will"
+				Formatter.showDescription(cursor.description)
+			
+			for row in cursor.fetchall():
+				Formatter.showColumns(row)
+			#if cursor.description and config.header:
+			#	print config.seperator . join( col[0] for col in cursor.description)
+			#for row in cursor.fetchall():
+			#	print config.seperator . join(str(field) for field in row)
+		except Exception as e:
+			Log.stderr("<" + self.sqlStatement + "> " + str(e))
+
+		self.sqlStatement = None
+		interpretor.prompt = config.mainPrompt()
+
+def processOptions(options):
+	global config
+
+	config = config()	
+	# ####################################
+	# First - process the resource file
+	# ####################################
+	home = os.path.expanduser("~")
+	resource_file = "%s/%s" % (home, ".sqliterc")
+	if os.path.exists( resource_file):
+		with open(resource_file) as fh:
+			for line in fh:
+				line = interpretor.precmd(line.rstrip('\n'))
+				interpretor.onecmd( line )
+
+	# ####################################
+	# Next - merge in the cmd line options
+	# ####################################
+	for key in options.__dict__:
+		if key in config.__dict__:
+			config.__dict__[key] = options.__dict__[key]
+
+	interpretor.prompt = config.mainPrompt()
+	
+# ##############################################################################
+# Main routine
+# ##############################################################################
+if __name__ == "__main__":
+	
+	parser = argparse.ArgumentParser("SQLITE3 interface")
+	parser.add_argument('-e', '--echo', action='store_true')
+	parser.add_argument('-s', '--seperator', default="|")
+	parser.add_argument('-c', '--column', dest="mode", action="store_const", const="column", default="list")
+	parser.add_argument('--header', action='store_true')
+	parser.add_argument("database", nargs="?", default=":memory:")
+	options = parser.parse_args()
+
+	createDatabase(options.database)
+	interpretor = isql()
+	processOptions(options);
+
+	mode = os.fstat(0).st_mode
+	if stat.S_ISFIFO(mode) or stat.S_ISREG(mode):
+		for line in sys.stdin:
+			interpretor.onecmd(line)	
+	else:
+		interpretor.cmdloop()
